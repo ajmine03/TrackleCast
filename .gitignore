@@ -1,0 +1,28 @@
+# Rust
+/target
+
+# User settings
+tacklecast_settings.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Distribution builds
+dist/
+
+# Logs (generated at runtime)
+logs/
+
+# Claude
+.claude/
+
+# Launcher exe (built locally)
+TackleCast.exe

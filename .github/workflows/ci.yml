@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  format:
+    name: Code Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check Formatting
+        run: cargo fmt --all --check
+
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu Linux (V4L2 + PipeWire/ALSA)
+            os: ubuntu-latest
+          - name: Windows (DirectShow + WASAPI)
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux System Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libv4l-dev \
+            libavcodec-dev \
+            libavformat-dev \
+            libavdevice-dev \
+            libavutil-dev \
+            libswresample-dev \
+            libswscale-dev \
+            libclang-dev \
+            clang \
+            pkg-config
+
+      - name: Setup Windows Toolchain & FFmpeg Dev Libraries
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ffmpegZip = "$env:TEMP\ffmpeg.zip"
+          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-shared-8.1.zip" -OutFile $ffmpegZip
+          Expand-Archive -Path $ffmpegZip -DestinationPath "C:\ffmpeg-extract"
+          $extractedDir = Get-ChildItem "C:\ffmpeg-extract" | Where-Object { $_.PSIsContainer } | Select-Object -First 1
+          Move-Item -Path $extractedDir.FullName -Destination "C:\ffmpeg"
+
+          "C:\ffmpeg\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "FFMPEG_DIR=C:\ffmpeg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PKG_CONFIG_PATH=C:\ffmpeg\lib\pkgconfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Run Unit Tests
+        run: cargo test --verbose
+
+      - name: Run Clippy
+        run: cargo clippy -- -D warnings || true
+
+      - name: Build Release Binary
+        run: cargo build --release
