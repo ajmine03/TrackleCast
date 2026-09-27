@@ -230,70 +230,19 @@ impl App {
     ) -> Self {
         let audio = AudioPassthrough::new();
 
-        let (streamer, stream_url) = if cli.stream {
-            match streamer::StreamServer::new("0.0.0.0", cli.stream_port, 48000, 2) {
-                Ok(server) => {
-                    let port = server.port();
-                    let url = format!("http://localhost:{port}/");
-                    let server_arc = Arc::new(server);
-
-                    let (tap_tx, tap_rx) = crossbeam_channel::bounded(64);
-                    audio.set_audio_tap(Some(tap_tx));
-
-                    let s_clone = server_arc.clone();
-                    std::thread::Builder::new()
-                        .name("audio-streamer-bridge".to_string())
-                        .spawn(move || {
-                            while let Ok(samples) = tap_rx.recv() {
-                                s_clone.broadcast_audio(&samples);
-                            }
-                        })
-                        .ok();
-
-                    if cli.test_mode {
-                        let s_test = server_arc.clone();
-                        std::thread::Builder::new()
-                            .name("test-tone-generator".to_string())
-                            .spawn(move || {
-                                let sample_rate = 48000.0f32;
-                                let freq = 440.0f32;
-                                let mut phase = 0.0f32;
-                                let chunk_size = 960;
-                                let mut chunk = vec![0.0f32; chunk_size * 2];
-                                loop {
-                                    for i in 0..chunk_size {
-                                        let sample = (phase * 2.0 * std::f32::consts::PI).sin() * 0.15;
-                                        phase += freq / sample_rate;
-                                        if phase >= 1.0 {
-                                            phase -= 1.0;
-                                        }
-                                        chunk[i * 2] = sample;
-                                        chunk[i * 2 + 1] = sample;
-                                    }
-                                    s_test.broadcast_audio(&chunk);
-                                    std::thread::sleep(Duration::from_millis(20));
-                                }
-                            })
-                            .ok();
-                    }
-
-                    (Some(server_arc), Some(url))
-                }
-                Err(e) => {
-                    warn!("streaming server failed to start: {e}");
-                    (None, None)
-                }
-            }
+        let should_stream = cli.stream || settings.stream_enabled;
+        let stream_port = if cli.stream_port != 8080 {
+            cli.stream_port
         } else {
-            (None, None)
+            settings.stream_port
         };
 
-        Self {
+        let mut app = Self {
             settings,
             test_mode: cli.test_mode,
             test_pattern: cli.test_pattern,
-            streamer,
-            stream_url,
+            streamer: None,
+            stream_url: None,
             video_devices,
             audio_inputs,
             audio_outputs,
@@ -316,7 +265,13 @@ impl App {
             last_frame_at: None,
             #[cfg(all(target_os = "windows", feature = "gpu-decode"))]
             gpu_monitor: gpu_monitor::GpuMonitor::try_new(),
+        };
+
+        if should_stream {
+            app.start_streamer(stream_port);
         }
+
+        app
     }
 
     fn create_window(event_loop: &ActiveEventLoop) -> Window {
@@ -577,12 +532,28 @@ impl ApplicationHandler<AppEvent> for App {
                     let toggle_fullscreen = prepared_ui.output.toggle_fullscreen;
                     let exit_requested = prepared_ui.output.exit_requested;
                     let apply_settings = prepared_ui.output.apply_settings.clone();
+                    let stream_toggle = prepared_ui.output.stream_toggle;
+                    let open_url = prepared_ui.output.open_url.clone();
                     if let Err(error) = renderer.render(Some(prepared_ui)) {
                         error!("render error: {error}");
                     }
                     self.render_frame_counter += 1;
                     if toggle_fullscreen {
                         self.toggle_fullscreen();
+                    }
+                    if let Some(enabled) = stream_toggle {
+                        self.settings.stream_enabled = enabled;
+                        if enabled {
+                            self.start_streamer(self.settings.stream_port);
+                        } else {
+                            self.stop_streamer();
+                        }
+                        if let Err(error) = self.settings.save() {
+                            warn!("failed to save settings: {error}");
+                        }
+                    }
+                    if let Some(url) = open_url {
+                        open_browser(&url);
                     }
                     if let Some(settings) = apply_settings {
                         self.apply_settings(settings);
@@ -776,6 +747,86 @@ impl App {
                 renderer.set_scale_filter(self.settings.scaling_filter);
             }
         }
+
+        let stream_changed = old_settings.stream_enabled != self.settings.stream_enabled
+            || old_settings.stream_port != self.settings.stream_port;
+
+        if stream_changed {
+            if self.settings.stream_enabled {
+                self.start_streamer(self.settings.stream_port);
+            } else {
+                self.stop_streamer();
+            }
+        }
+    }
+
+    fn start_streamer(&mut self, port: u16) {
+        self.stop_streamer();
+
+        match streamer::StreamServer::new("0.0.0.0", port, 48000, 2) {
+            Ok(server) => {
+                let actual_port = server.port();
+                let url = format!("http://localhost:{actual_port}/");
+                let server_arc = Arc::new(server);
+
+                let (tap_tx, tap_rx) = crossbeam_channel::bounded(64);
+                self.audio.set_audio_tap(Some(tap_tx));
+
+                let s_clone = server_arc.clone();
+                std::thread::Builder::new()
+                    .name("audio-streamer-bridge".to_string())
+                    .spawn(move || {
+                        while let Ok(samples) = tap_rx.recv() {
+                            s_clone.broadcast_audio(&samples);
+                        }
+                    })
+                    .ok();
+
+                if self.test_mode {
+                    let s_test = server_arc.clone();
+                    std::thread::Builder::new()
+                        .name("test-tone-generator".to_string())
+                        .spawn(move || {
+                            let sample_rate = 48000.0f32;
+                            let freq = 440.0f32;
+                            let mut phase = 0.0f32;
+                            let chunk_size = 960;
+                            let mut chunk = vec![0.0f32; chunk_size * 2];
+                            loop {
+                                for i in 0..chunk_size {
+                                    let sample = (phase * 2.0 * std::f32::consts::PI).sin() * 0.15;
+                                    phase += freq / sample_rate;
+                                    if phase >= 1.0 {
+                                        phase -= 1.0;
+                                    }
+                                    chunk[i * 2] = sample;
+                                    chunk[i * 2 + 1] = sample;
+                                }
+                                s_test.broadcast_audio(&chunk);
+                                std::thread::sleep(Duration::from_millis(20));
+                            }
+                        })
+                        .ok();
+                }
+
+                info!("Local web stream started at {url}");
+                self.stream_url = Some(url);
+                self.streamer = Some(server_arc);
+            }
+            Err(e) => {
+                warn!("streaming server failed to start: {e}");
+                self.stream_url = None;
+                self.streamer = None;
+            }
+        }
+    }
+
+    fn stop_streamer(&mut self) {
+        if let Some(streamer) = self.streamer.take() {
+            streamer.request_stop();
+        }
+        self.audio.set_audio_tap(None);
+        self.stream_url = None;
     }
 
     fn overlay_info(&self) -> OverlayInfo {
@@ -923,5 +974,22 @@ impl App {
             self.settings.volume,
             self.settings.audio_muted,
         );
+    }
+}
+
+fn open_browser(url: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
     }
 }

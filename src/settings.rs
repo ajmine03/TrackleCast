@@ -38,6 +38,10 @@ pub struct Settings {
     /// over three lines. Off by default, keeping the overlay to one line.
     #[serde(default)]
     pub detailed_overlay: bool,
+    #[serde(default = "default_stream_enabled")]
+    pub stream_enabled: bool,
+    #[serde(default = "default_stream_port")]
+    pub stream_port: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +101,8 @@ impl Default for Settings {
             audio_muted: false,
             show_overlay: default_show_overlay(),
             detailed_overlay: false,
+            stream_enabled: default_stream_enabled(),
+            stream_port: default_stream_port(),
         }
     }
 }
@@ -225,6 +231,14 @@ fn default_show_overlay() -> bool {
     true
 }
 
+fn default_stream_enabled() -> bool {
+    true
+}
+
+fn default_stream_port() -> u16 {
+    8080
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +275,8 @@ mod tests {
         assert_eq!(settings.get_fps(), 120);
         assert!(settings.show_overlay);
         assert!(!settings.audio_muted);
+        assert!(settings.stream_enabled);
+        assert_eq!(settings.stream_port, 8080);
     }
 
     #[test]

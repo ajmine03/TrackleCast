@@ -42,9 +42,15 @@ pub struct StreamServer {
 }
 
 impl StreamServer {
-    pub fn new(bind_address: &str, port: u16, sample_rate: u32, channels: u16) -> Result<Self, String> {
+    pub fn new(
+        bind_address: &str,
+        port: u16,
+        sample_rate: u32,
+        channels: u16,
+    ) -> Result<Self, String> {
         let addr = format!("{bind_address}:{port}");
-        let listener = TcpListener::bind(&addr).map_err(|e| format!("failed to bind streaming server on {addr}: {e}"))?;
+        let listener = TcpListener::bind(&addr)
+            .map_err(|e| format!("failed to bind streaming server on {addr}: {e}"))?;
         listener
             .set_nonblocking(true)
             .map_err(|e| format!("failed to set nonblocking on listener: {e}"))?;
@@ -128,12 +134,10 @@ impl StreamServer {
         if let Some(bytes) = jpeg_bytes {
             let shared_bytes = Arc::new(bytes);
             let mut subs = self.state.video_subscribers.lock().unwrap();
-            subs.retain(|tx| {
-                match tx.try_send(shared_bytes.clone()) {
-                    Ok(_) => true,
-                    Err(crossbeam_channel::TrySendError::Full(_)) => true,
-                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => false,
-                }
+            subs.retain(|tx| match tx.try_send(shared_bytes.clone()) {
+                Ok(_) => true,
+                Err(crossbeam_channel::TrySendError::Full(_)) => true,
+                Err(crossbeam_channel::TrySendError::Disconnected(_)) => false,
             });
         }
     }
@@ -149,17 +153,19 @@ impl StreamServer {
             .collect();
 
         let mut subs = self.state.audio_subscribers.lock().unwrap();
-        subs.retain(|tx| {
-            match tx.try_send(pcm_chunk.clone()) {
-                Ok(_) => true,
-                Err(crossbeam_channel::TrySendError::Full(_)) => true,
-                Err(crossbeam_channel::TrySendError::Disconnected(_)) => false,
-            }
+        subs.retain(|tx| match tx.try_send(pcm_chunk.clone()) {
+            Ok(_) => true,
+            Err(crossbeam_channel::TrySendError::Full(_)) => true,
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => false,
         });
     }
 
-    pub fn stop(&mut self) {
+    pub fn request_stop(&self) {
         self.state.stop_flag.store(true, Ordering::SeqCst);
+    }
+
+    pub fn stop(&mut self) {
+        self.request_stop();
         if let Some(handle) = self.listener_thread.take() {
             let _ = handle.join();
         }
@@ -545,7 +551,9 @@ fn serve_mjpeg_stream(mut stream: TcpStream, state: Arc<StreamState>) -> Result<
                   Expires: 0\r\n\
                   Connection: close\r\n\r\n";
 
-    stream.write_all(header.as_bytes()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(header.as_bytes())
+        .map_err(|e| e.to_string())?;
 
     let (tx, rx): (Sender<Arc<Vec<u8>>>, Receiver<Arc<Vec<u8>>>) = bounded(MAX_SUBSCRIBER_QUEUE);
     {
@@ -601,12 +609,16 @@ fn serve_audio_stream(mut stream: TcpStream, state: Arc<StreamState>) -> Result<
                   Transfer-Encoding: chunked\r\n\
                   Connection: close\r\n\r\n";
 
-    stream.write_all(header.as_bytes()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(header.as_bytes())
+        .map_err(|e| e.to_string())?;
 
     // Initial 44-byte WAV header sent as the first chunk
     let wav_hdr = create_wav_header(state.sample_rate, state.channels);
     let chunk_hdr = format!("{:X}\r\n", wav_hdr.len());
-    stream.write_all(chunk_hdr.as_bytes()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(chunk_hdr.as_bytes())
+        .map_err(|e| e.to_string())?;
     stream.write_all(&wav_hdr).map_err(|e| e.to_string())?;
     stream.write_all(b"\r\n").map_err(|e| e.to_string())?;
 
@@ -674,7 +686,9 @@ fn serve_status_json(stream: &mut TcpStream, state: &StreamState) -> Result<(), 
         json
     );
 
-    stream.write_all(response.as_bytes()).map_err(|e| e.to_string())
+    stream
+        .write_all(response.as_bytes())
+        .map_err(|e| e.to_string())
 }
 
 fn create_wav_header(sample_rate: u32, channels: u16) -> [u8; 44] {
@@ -726,7 +740,8 @@ fn yuv_to_rgb(
 
                         let c = y_val - 16;
                         let r = ((298 * c + 409 * v_val + 128) >> 8).clamp(0, 255) as u8;
-                        let g = ((298 * c - 100 * u_val - 208 * v_val + 128) >> 8).clamp(0, 255) as u8;
+                        let g =
+                            ((298 * c - 100 * u_val - 208 * v_val + 128) >> 8).clamp(0, 255) as u8;
                         let b = ((298 * c + 516 * u_val + 128) >> 8).clamp(0, 255) as u8;
 
                         let rgb_idx = y_idx * 3;
@@ -764,7 +779,13 @@ fn yuv_to_rgb(
     }
 }
 
-fn encode_jpeg(rgb: &[u8], width: u32, height: u32, quality: u8, jpeg_out: &mut Vec<u8>) -> Option<Vec<u8>> {
+fn encode_jpeg(
+    rgb: &[u8],
+    width: u32,
+    height: u32,
+    quality: u8,
+    jpeg_out: &mut Vec<u8>,
+) -> Option<Vec<u8>> {
     jpeg_out.clear();
     let mut encoder = JpegEncoder::new_with_quality(&mut *jpeg_out, quality);
     if encoder
@@ -793,7 +814,10 @@ mod tests {
         // Channels = 2
         assert_eq!(u16::from_le_bytes([hdr[22], hdr[23]]), 2);
         // Sample rate = 48000
-        assert_eq!(u32::from_le_bytes([hdr[24], hdr[25], hdr[26], hdr[27]]), 48000);
+        assert_eq!(
+            u32::from_le_bytes([hdr[24], hdr[25], hdr[26], hdr[27]]),
+            48000
+        );
         // Bits per sample = 16
         assert_eq!(u16::from_le_bytes([hdr[34], hdr[35]]), 16);
     }
@@ -806,7 +830,9 @@ mod tests {
 
         // Test GET /status
         let mut client = TcpStream::connect("127.0.0.1:18080").expect("connects to server");
-        client.write_all(b"GET /status HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        client
+            .write_all(b"GET /status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
         let mut response = String::new();
         client.read_to_string(&mut response).unwrap();
 
@@ -817,7 +843,9 @@ mod tests {
 
         // Test GET /
         let mut client2 = TcpStream::connect("127.0.0.1:18080").expect("connects to server");
-        client2.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        client2
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
         let mut response2 = String::new();
         client2.read_to_string(&mut response2).unwrap();
 
@@ -828,4 +856,3 @@ mod tests {
         server.stop();
     }
 }
-

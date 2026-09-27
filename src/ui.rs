@@ -67,6 +67,8 @@ pub struct UiOutput {
     pub apply_settings: Option<Settings>,
     pub toggle_fullscreen: bool,
     pub exit_requested: bool,
+    pub stream_toggle: Option<bool>,
+    pub open_url: Option<String>,
 }
 
 impl UiState {
@@ -91,7 +93,11 @@ impl UiState {
         }
     }
 
-    pub fn on_window_event(&mut self, window: &Window, event: &WindowEvent) -> egui_winit::EventResponse {
+    pub fn on_window_event(
+        &mut self,
+        window: &Window,
+        event: &WindowEvent,
+    ) -> egui_winit::EventResponse {
         self.egui_winit.on_window_event(window, event)
     }
 
@@ -382,18 +388,45 @@ fn draw_menu(
                             ));
                         }
 
-                        if let Some(url) = stream_info {
-                            separator(ui);
-                            section_header(ui, "LOCAL STREAM", text_scale);
+                        separator(ui);
+                        section_header(ui, "LOCAL STREAM (CLOUD PLAY)", text_scale);
+                        if ui
+                            .add(Checkbox::new(
+                                &mut draft.stream_enabled,
+                                RichText::new("Enable Localhost & Wi-Fi Streaming")
+                                    .color(COLOR_TEXT_PRIMARY),
+                            ))
+                            .changed()
+                        {
+                            output.stream_toggle = Some(draft.stream_enabled);
+                        }
+
+                        if draft.stream_enabled {
+                            let url_str = stream_info.unwrap_or("http://localhost:8080/");
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!("● Live at: {url_str}"))
+                                        .color(Color32::from_rgb(0x4E, 0xCD, 0xC4))
+                                        .strong(),
+                                );
+                                if styled_button(ui, "Open in Browser").clicked() {
+                                    output.open_url = Some(url_str.to_string());
+                                }
+                            });
                             ui.label(
-                                RichText::new(format!("● Streaming live on: {url}"))
-                                    .color(Color32::from_rgb(0x4E, 0xCD, 0xC4))
-                                    .strong(),
+                                RichText::new(
+                                    "Open this URL on this laptop or another phone/PC to watch & listen!",
+                                )
+                                .size(12.0 * text_scale)
+                                .color(COLOR_TEXT_HINT),
                             );
+                        } else {
                             ui.label(
-                                RichText::new("Open this URL on your phone/laptop to watch & listen!")
-                                    .size(12.0 * text_scale)
-                                    .color(COLOR_TEXT_HINT),
+                                RichText::new(
+                                    "Streaming is off. Tick the checkbox to stream screen & audio to browser.",
+                                )
+                                .size(12.0 * text_scale)
+                                .color(COLOR_TEXT_HINT),
                             );
                         }
 
