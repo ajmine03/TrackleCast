@@ -26,3 +26,9 @@ logs/
 
 # Launcher exe (built locally)
 TackleCast.exe
+
+# Local build dependencies
+/.deps/
+/.cargo/
+
+

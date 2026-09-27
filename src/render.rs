@@ -801,6 +801,7 @@ impl VideoFrameResources {
 }
 
 /// Align a byte count up to the next multiple of `alignment`.
+#[allow(dead_code)]
 fn align_up(value: u32, alignment: u32) -> u32 {
     (value + alignment - 1) & !(alignment - 1)
 }

@@ -321,7 +321,11 @@ impl CaptureThread {
     pub fn stop(&mut self) {
         self.stop_flag.store(true, Ordering::Relaxed);
         if let Some(join_handle) = self.join_handle.take() {
-            let _ = join_handle.join();
+            let _ = std::thread::Builder::new()
+                .name("capture-cleanup".to_string())
+                .spawn(move || {
+                    let _ = join_handle.join();
+                });
         }
     }
 }

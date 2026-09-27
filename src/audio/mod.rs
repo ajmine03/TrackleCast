@@ -28,6 +28,7 @@ pub struct AudioPassthrough {
     output_stream: Option<Stream>,
     volume_ctrl: VolumeController,
     diagnostics: Arc<AudioDiagnostics>,
+    tap_tx: Arc<std::sync::RwLock<Option<crossbeam_channel::Sender<Vec<f32>>>>>,
 }
 
 impl AudioPassthrough {
@@ -37,6 +38,13 @@ impl AudioPassthrough {
             output_stream: None,
             volume_ctrl: VolumeController::new(1.0, false),
             diagnostics: Arc::new(AudioDiagnostics::new()),
+            tap_tx: Arc::new(std::sync::RwLock::new(None)),
+        }
+    }
+
+    pub fn set_audio_tap(&self, tx: Option<crossbeam_channel::Sender<Vec<f32>>>) {
+        if let Ok(mut lock) = self.tap_tx.write() {
+            *lock = tx;
         }
     }
 
@@ -135,9 +143,10 @@ impl AudioPassthrough {
         self.diagnostics.set_input_info(Some(in_info));
         self.diagnostics.set_output_info(Some(out_info));
 
-        let ring = Arc::new(AudioRingBuffer::new(
+        let ring = Arc::new(AudioRingBuffer::new_with_tap(
             RING_BUFFER_CAPACITY,
             self.diagnostics.clone(),
+            self.tap_tx.clone(),
         ));
 
         let input_stream = match build_input_stream(

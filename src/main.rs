@@ -12,6 +12,7 @@ mod gpu_monitor;
 mod logger;
 mod render;
 mod settings;
+mod streamer;
 mod triple_buffer;
 mod ui;
 
@@ -41,6 +42,7 @@ use winit::window::{Window, WindowAttributes};
 const WINDOW_TITLE: &str = "TackleCast";
 const INITIAL_WIDTH: u32 = 1280;
 const INITIAL_HEIGHT: u32 = 720;
+#[allow(dead_code)]
 const APP_ID: &str = "tacklecast.tacklecast.v1";
 
 /// How often the event loop wakes when no frames are arriving, to poll the
@@ -70,6 +72,8 @@ enum TestPatternMode {
 struct CliArgs {
     test_mode: bool,
     test_pattern: TestPatternMode,
+    stream: bool,
+    stream_port: u16,
 }
 
 impl CliArgs {
@@ -91,9 +95,26 @@ impl CliArgs {
             || has_flag("--test-yuvj422p")
             || has_flag("--test-mjpeg");
 
+        let mut stream_port = 8080;
+        let mut port_specified = false;
+        for (i, arg) in args.iter().enumerate() {
+            if (arg.eq_ignore_ascii_case("--stream-port") || arg.eq_ignore_ascii_case("--port"))
+                && i + 1 < args.len()
+            {
+                if let Ok(p) = args[i + 1].parse::<u16>() {
+                    stream_port = p;
+                    port_specified = true;
+                }
+            }
+        }
+
+        let stream = has_flag("--stream") || has_flag("--serve") || port_specified;
+
         Self {
             test_mode,
             test_pattern,
+            stream,
+            stream_port,
         }
     }
 }
@@ -159,8 +180,7 @@ fn main() {
     let cli = CliArgs::parse();
     let mut app = App::new(
         settings,
-        cli.test_mode,
-        cli.test_pattern,
+        cli,
         video_devices,
         audio_inputs,
         audio_outputs,
@@ -173,6 +193,8 @@ struct App {
     settings: Settings,
     test_mode: bool,
     test_pattern: TestPatternMode,
+    streamer: Option<Arc<streamer::StreamServer>>,
+    stream_url: Option<String>,
     video_devices: Vec<String>,
     audio_inputs: Vec<AudioDevice>,
     audio_outputs: Vec<AudioDevice>,
@@ -200,17 +222,78 @@ struct App {
 impl App {
     fn new(
         settings: Settings,
-        test_mode: bool,
-        test_pattern: TestPatternMode,
+        cli: CliArgs,
         video_devices: Vec<String>,
         audio_inputs: Vec<AudioDevice>,
         audio_outputs: Vec<AudioDevice>,
         event_proxy: EventLoopProxy<AppEvent>,
     ) -> Self {
+        let audio = AudioPassthrough::new();
+
+        let (streamer, stream_url) = if cli.stream {
+            match streamer::StreamServer::new("0.0.0.0", cli.stream_port, 48000, 2) {
+                Ok(server) => {
+                    let port = server.port();
+                    let url = format!("http://localhost:{port}/");
+                    let server_arc = Arc::new(server);
+
+                    let (tap_tx, tap_rx) = crossbeam_channel::bounded(64);
+                    audio.set_audio_tap(Some(tap_tx));
+
+                    let s_clone = server_arc.clone();
+                    std::thread::Builder::new()
+                        .name("audio-streamer-bridge".to_string())
+                        .spawn(move || {
+                            while let Ok(samples) = tap_rx.recv() {
+                                s_clone.broadcast_audio(&samples);
+                            }
+                        })
+                        .ok();
+
+                    if cli.test_mode {
+                        let s_test = server_arc.clone();
+                        std::thread::Builder::new()
+                            .name("test-tone-generator".to_string())
+                            .spawn(move || {
+                                let sample_rate = 48000.0f32;
+                                let freq = 440.0f32;
+                                let mut phase = 0.0f32;
+                                let chunk_size = 960;
+                                let mut chunk = vec![0.0f32; chunk_size * 2];
+                                loop {
+                                    for i in 0..chunk_size {
+                                        let sample = (phase * 2.0 * std::f32::consts::PI).sin() * 0.15;
+                                        phase += freq / sample_rate;
+                                        if phase >= 1.0 {
+                                            phase -= 1.0;
+                                        }
+                                        chunk[i * 2] = sample;
+                                        chunk[i * 2 + 1] = sample;
+                                    }
+                                    s_test.broadcast_audio(&chunk);
+                                    std::thread::sleep(Duration::from_millis(20));
+                                }
+                            })
+                            .ok();
+                    }
+
+                    (Some(server_arc), Some(url))
+                }
+                Err(e) => {
+                    warn!("streaming server failed to start: {e}");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+
         Self {
             settings,
-            test_mode,
-            test_pattern,
+            test_mode: cli.test_mode,
+            test_pattern: cli.test_pattern,
+            streamer,
+            stream_url,
             video_devices,
             audio_inputs,
             audio_outputs,
@@ -219,7 +302,7 @@ impl App {
             renderer: None,
             ui: None,
             capture: None,
-            audio: AudioPassthrough::new(),
+            audio,
             latest_stats: None,
             latest_error: None,
             is_fullscreen: false,
@@ -388,13 +471,15 @@ impl ApplicationHandler<AppEvent> for App {
         window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
-        let Some(window) = &self.window else {
+        let Some(window) = self.window.clone() else {
             return;
         };
 
         if window.id() != window_id {
             return;
         }
+
+        let mut needs_redraw = false;
 
         if let WindowEvent::KeyboardInput { event, .. } = &event {
             if event.state == ElementState::Pressed && !event.repeat {
@@ -412,11 +497,12 @@ impl ApplicationHandler<AppEvent> for App {
                         if self.ui.as_ref().is_some_and(|ui| ui.is_menu_open()) {
                             self.set_cursor_visible(true);
                         }
-
+                        window.request_redraw();
                         return;
                     }
                     Key::Named(NamedKey::F11) => {
                         self.toggle_fullscreen();
+                        window.request_redraw();
                         return;
                     }
                     _ => {}
@@ -424,12 +510,12 @@ impl ApplicationHandler<AppEvent> for App {
             }
         }
 
-        // Forward every event, not just while the menu is open: egui also
-        // tracks DPI, surface size, modifiers, and pointer position from these,
-        // and goes stale (wrong scale factor after a monitor change, unknown
-        // pointer position) if it only sees them some of the time.
+        // Forward every event to egui: tracks DPI, surface size, modifiers, pointer.
         if let Some(ui) = &mut self.ui {
-            ui.on_window_event(window, &event);
+            let response = ui.on_window_event(&window, &event);
+            if response.repaint || ui.is_menu_open() {
+                needs_redraw = true;
+            }
         }
 
         match event {
@@ -446,6 +532,10 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::CursorMoved { .. } => {
                 self.last_cursor_moved = Instant::now();
                 self.set_cursor_visible(true);
+                needs_redraw = true;
+            }
+            WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } => {
+                needs_redraw = true;
             }
             WindowEvent::Resized(size) => {
                 self.is_minimized = size.width == 0 || size.height == 0;
@@ -472,7 +562,7 @@ impl ApplicationHandler<AppEvent> for App {
                 let audio_status = self.audio.status().to_string();
                 if let (Some(renderer), Some(ui)) = (&mut self.renderer, &mut self.ui) {
                     let prepared_ui = ui.prepare(
-                        window,
+                        &window,
                         UiFrame {
                             overlay: &overlay,
                             settings: &self.settings,
@@ -481,6 +571,7 @@ impl ApplicationHandler<AppEvent> for App {
                             audio_outputs: &self.audio_outputs,
                             is_fullscreen: self.is_fullscreen,
                             audio_status: &audio_status,
+                            stream_info: self.stream_url.as_deref(),
                         },
                     );
                     let toggle_fullscreen = prepared_ui.output.toggle_fullscreen;
@@ -510,27 +601,27 @@ impl ApplicationHandler<AppEvent> for App {
             }
             _ => {}
         }
+
+        if needs_redraw && !self.is_minimized {
+            window.request_redraw();
+        }
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
             AppEvent::FrameReady => {
-                // Skip frame processing entirely when the window isn't visible.
-                // Without a render pass to drain them, queued write_texture calls
-                // accumulate in GPU memory indefinitely (display off, minimized, etc).
-                if self.is_minimized {
-                    // Still drain the triple buffer so it doesn't hold stale frames
-                    if let Some(capture) = &mut self.capture {
-                        let _ = capture.latest_frame();
-                    }
-                    return;
-                }
-
                 let mut uploaded = false;
-                if let (Some(capture), Some(renderer)) = (&mut self.capture, &mut self.renderer) {
+                if let Some(capture) = &mut self.capture {
                     if let Some(frame) = capture.latest_frame() {
-                        renderer.upload_frame(frame);
-                        uploaded = true;
+                        if let Some(streamer) = &self.streamer {
+                            streamer.broadcast_frame(frame);
+                        }
+                        if !self.is_minimized {
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.upload_frame(frame);
+                                uploaded = true;
+                            }
+                        }
                     }
                 }
                 if uploaded {
@@ -540,8 +631,10 @@ impl ApplicationHandler<AppEvent> for App {
                     self.update_sleep_suppression();
                 }
 
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+                if !self.is_minimized {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
             }
         }
@@ -559,6 +652,9 @@ impl ApplicationHandler<AppEvent> for App {
         // These are low-frequency and don't need event-driven wakeup.
         if let Some(capture) = &mut self.capture {
             if let Some(stats) = capture.latest_stats() {
+                if let Some(streamer) = &self.streamer {
+                    streamer.update_stats(stats.width, stats.height, stats.fps);
+                }
                 self.latest_stats = Some(stats);
             }
 
@@ -615,6 +711,19 @@ impl ApplicationHandler<AppEvent> for App {
             && self.ui.as_ref().is_none_or(|ui| !ui.is_menu_open())
         {
             self.set_cursor_visible(false);
+        }
+
+        // Keep window redrawing if the menu is open, or if frames are not arriving
+        // (e.g. while connecting or negotiating) so the OS compositor never marks the window as unresponsive.
+        if let Some(window) = &self.window {
+            let menu_open = self.ui.as_ref().is_some_and(|ui| ui.is_menu_open());
+            let no_video = self
+                .last_frame_at
+                .map(|t| t.elapsed() >= Duration::from_millis(50))
+                .unwrap_or(true);
+            if (menu_open || no_video) && !self.is_minimized {
+                window.request_redraw();
+            }
         }
 
         // Let the display sleep again once frames have stopped arriving.

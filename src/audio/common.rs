@@ -406,10 +406,20 @@ pub struct AudioRingBuffer {
     read_index: AtomicUsize,
     write_index: AtomicUsize,
     diagnostics: Arc<AudioDiagnostics>,
+    tap_tx: Arc<RwLock<Option<crossbeam_channel::Sender<Vec<f32>>>>>,
 }
 
 impl AudioRingBuffer {
+    #[allow(dead_code)]
     pub fn new(capacity: usize, diagnostics: Arc<AudioDiagnostics>) -> Self {
+        Self::new_with_tap(capacity, diagnostics, Arc::new(RwLock::new(None)))
+    }
+
+    pub fn new_with_tap(
+        capacity: usize,
+        diagnostics: Arc<AudioDiagnostics>,
+        tap_tx: Arc<RwLock<Option<crossbeam_channel::Sender<Vec<f32>>>>>,
+    ) -> Self {
         let mut values = Vec::with_capacity(capacity);
         values.resize_with(capacity, || AtomicU32::new(0));
         Self {
@@ -418,6 +428,7 @@ impl AudioRingBuffer {
             read_index: AtomicUsize::new(0),
             write_index: AtomicUsize::new(0),
             diagnostics,
+            tap_tx,
         }
     }
 
@@ -461,6 +472,11 @@ impl AudioRingBuffer {
 
         if written > 0 {
             self.write_index.store(write, Ordering::Release);
+            if let Ok(lock) = self.tap_tx.read() {
+                if let Some(ref tx) = *lock {
+                    let _ = tx.try_send(samples[..written].to_vec());
+                }
+            }
         }
 
         written

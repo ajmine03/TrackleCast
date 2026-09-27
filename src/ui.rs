@@ -52,6 +52,7 @@ pub struct UiFrame<'a> {
     pub audio_outputs: &'a [AudioDevice],
     pub is_fullscreen: bool,
     pub audio_status: &'a str,
+    pub stream_info: Option<&'a str>,
 }
 
 pub struct PreparedUi {
@@ -90,8 +91,8 @@ impl UiState {
         }
     }
 
-    pub fn on_window_event(&mut self, window: &Window, event: &WindowEvent) -> bool {
-        self.egui_winit.on_window_event(window, event).consumed
+    pub fn on_window_event(&mut self, window: &Window, event: &WindowEvent) -> egui_winit::EventResponse {
+        self.egui_winit.on_window_event(window, event)
     }
 
     pub fn is_menu_open(&self) -> bool {
@@ -135,6 +136,7 @@ impl UiState {
                     frame.audio_outputs,
                     frame.is_fullscreen,
                     frame.audio_status,
+                    frame.stream_info,
                     &mut ui_output,
                 );
             }
@@ -241,6 +243,7 @@ fn draw_menu(
     audio_outputs: &[AudioDevice],
     is_fullscreen: bool,
     audio_status: &str,
+    stream_info: Option<&str>,
     output: &mut UiOutput,
 ) {
     let screen_rect = ctx.screen_rect();
@@ -377,6 +380,21 @@ fn draw_menu(
                                 RichText::new("Include Scaling Filter In Overlay")
                                     .color(COLOR_TEXT_PRIMARY),
                             ));
+                        }
+
+                        if let Some(url) = stream_info {
+                            separator(ui);
+                            section_header(ui, "LOCAL STREAM", text_scale);
+                            ui.label(
+                                RichText::new(format!("● Streaming live on: {url}"))
+                                    .color(Color32::from_rgb(0x4E, 0xCD, 0xC4))
+                                    .strong(),
+                            );
+                            ui.label(
+                                RichText::new("Open this URL on your phone/laptop to watch & listen!")
+                                    .size(12.0 * text_scale)
+                                    .color(COLOR_TEXT_HINT),
+                            );
                         }
 
                         separator(ui);
